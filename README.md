@@ -94,3 +94,21 @@ Related upstream references:
 ## License
 
 MIT for the code in this repository. Upstream openGym is separately AGPL-licensed; any copied or adapted upstream implementation must comply with its license.
+
+
+## Heart-rate recording (prototype)
+
+**Supported on the original fēnix 5S:** uses Toybox.Sensor (API 1.0+) for live BPM and Toybox.ActivityRecording (API 1.0+) for native Garmin FIT recording. The manifest requests Sensor and Fit permissions. Watch code still requires SDK compilation and testing on the real watch.
+
+1. Open **openGym Remote**. Live HR appears as `HR xxx bpm`, or `HR -- bpm` if no reliable sensor reading is available.
+2. UP/DOWN to **Start HR activity**, then START. This begins a Garmin FIT training activity with sensor heart rate; no server is necessary for FIT recording.
+3. While recording, the app displays the current HR, average, and maximum. It samples at most once every five seconds for the demo bridge and sends batches of up to six readings, typically every 30 seconds, through HTTPS with the dedicated watch token.
+4. Select **Save HR activity** to finish. If you exit while recording, the app attempts to save automatically. Garmin can sync the saved FIT activity to Garmin Connect through normal activity sync.
+
+**Bridge HR endpoint:** Following a successful GET /v1/state, the watch uses the returned demo `sessionId` when POSTing `/v1/heart-rate` with JSON `{"sessionId":"...","samples":[{"t":1800000000,"bpm":120}]}`. Timestamps are Unix seconds. The authenticated GET `/v1/heart-rate` returns count, min, max, average, and latest BPM for the current demo session.
+
+Each accepted sample is journaled to `data/heart-rate.jsonl` (override with `HR_DATA_FILE`), excluded from git. Secure and back up this private file. Samples are bounded, validated, and deduplicated by session/timestamp across bridge restarts.
+
+**Important limits:** The FIT activity is separate from upstream openGym workout history. This bridge records only a demo workout, **not a real OpenGym workout**. The watch app must remain running to send bridge samples. Pending samples are buffered for up to 48 readings (about four minutes), but are **not persisted across watch app exits or crashes**. Garmin FIT is the more durable HR record. Network failures are retried at most about every 30 seconds; longer outages may lose bridge samples. Garmin Connect sync is handled by Garmin, not this demo bridge. Wrist heart rate is not intended for medical monitoring.
+
+Next step: integrate the stream with real OpenGym workout IDs in the Android app/backend and avoid duplicate Health Connect workout sessions.

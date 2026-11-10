@@ -9,6 +9,14 @@ class OpenGymApp extends Application.AppBase {
         controller = new GymController();
     }
 
+    function onStart(state) {
+        controller.startSensors();
+    }
+
+    function onStop(state) {
+        controller.shutDown();
+    }
+
     function getInitialView() {
         return [ new GymView(controller), new GymDelegate(controller) ];
     }
