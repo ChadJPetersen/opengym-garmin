@@ -197,7 +197,8 @@ class WatchSnapshot {
         var out = { "found" => false, "workoutId" => "", "exercise" => "",
             "exerciseId" => "", "entryIdx" => 0, "setIdx" => 0, "setNumber" => 0,
             "setCount" => 0, "reps" => 0, "weight" => 0.0, "weightText" => "",
-            "unit" => "kg", "restEndsAt" => 0.toLong(), "confirmed" => [] };
+            "unit" => "kg", "restEndsAt" => 0.toLong(), "confirmed" => [],
+            "defaultRest" => 90 };
         if (lengthValue > 49152 || lengthValue < 3) { return out; }
         var active = field(0, "active");
         if (active < 0 || ch(active) != "{") { return out; }
@@ -212,6 +213,7 @@ class WatchSnapshot {
         var unit = readString(field(active, "unit"));
         if (unit == "") { unit = readString(field(0, "unit")); }
         out["unit"] = unit == "lb" ? "lb" : "kg";
+        out["defaultRest"] = readInt(field(0, "restSec"), 90);
         var rest = field(active, "rest");
         if (rest >= 0 && ch(rest) == "{") {
             out["restEndsAt"] = readLong(field(rest, "endsAt"), 0.toLong());
@@ -240,7 +242,8 @@ class WatchSnapshot {
                         "reps" => readInt(field(st, "r"), 0),
                         "weight" => readFloat(field(st, "w"), 0.0),
                         "weightText" => readScalar(field(st, "w")),
-                        "unit" => out["unit"], "restEndsAt" => out["restEndsAt"] };
+                        "unit" => out["unit"], "restEndsAt" => out["restEndsAt"],
+                        "defaultRest" => out["defaultRest"] };
                 }
             }
         }
