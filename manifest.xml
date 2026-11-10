@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<iq:manifest version="3" xmlns:iq="http://www.garmin.com/xml/connectiq">
+  <iq:application
+      id="a829eb485f594a09b52649ffb83afc19"
+      type="watch-app"
+      name="@Strings.AppName"
+      entry="OpenGymApp"
+      minApiLevel="3.1.0">
+    <iq:products>
+      <iq:product id="fenix5s" />
+    </iq:products>
+    <iq:permissions>
+      <iq:uses-permission id="Communications" />
+    </iq:permissions>
+    <iq:languages>
+      <iq:language>eng</iq:language>
+    </iq:languages>
+  </iq:application>
+</iq:manifest>

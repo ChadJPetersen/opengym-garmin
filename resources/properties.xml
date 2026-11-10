@@ -1,0 +1,4 @@
+<properties>
+  <property id="serverUrl" type="string">https://example.invalid</property>
+  <property id="watchToken" type="string"></property>
+</properties>

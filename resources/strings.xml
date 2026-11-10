@@ -1,0 +1,7 @@
+<strings>
+  <string id="AppName">openGym Remote</string>
+  <string id="ServerUrlTitle">Bridge base URL (HTTPS)</string>
+  <string id="ServerUrlPrompt">https://example.com</string>
+  <string id="WatchTokenTitle">Dedicated watch token</string>
+  <string id="WatchTokenPrompt">Watch-only token; NOT your OpenGym password</string>
+</strings>
