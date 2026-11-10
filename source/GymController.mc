@@ -333,7 +333,8 @@ class GymController {
         }
         outbox.add(ev);
         saveQueue(); // Persist before network: a crash cannot silently lose a set.
-        var rest = 90;
+        var rest = activeSnapshot != null ? activeSnapshot["defaultRest"] : 90;
+        if (rest == null || rest < 0 || rest > 3600) { rest = 90; }
         // The phone's own rest timer starts when it applies the event. Until
         // then use a watch-local countdown; don't claim it changed the app.
         localRestEndsAt = nowMillis() + rest * 1000;
@@ -436,7 +437,8 @@ class GymController {
                 WatchUi.requestUpdate();
                 return;
             }
-            var ev = outbox.remove(0);
+            var ev = outbox[0];
+            outbox = outbox.slice(1, null);
             var key = setKey(ev["wid"], ev["entryIdx"], ev["setIdx"]);
             if (!keyIn(awaiting, key)) { awaiting.add(key); }
             saveQueue();
@@ -451,5 +453,6 @@ class GymController {
             status = "Queued for OpenGym";
         }
         WatchUi.requestUpdate();
+        if (kind == "events" && outbox.size() > 0) { sendNext(); }
     }
 }
