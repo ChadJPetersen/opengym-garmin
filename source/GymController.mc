@@ -2,9 +2,11 @@ import Toybox.ActivityRecording;
 import Toybox.Application;
 import Toybox.Communications;
 import Toybox.Lang;
+import Toybox.Math;
 import Toybox.Sensor;
 import Toybox.System;
 import Toybox.Time;
+import Toybox.Timer;
 import Toybox.WatchUi;
 
 // The bridge contract is intentionally small. It is NOT the upstream openGym API.
@@ -37,8 +39,16 @@ class GymController {
     var heartSendingCount = 0;
     var heartNextRetryAt = 0;
     var heartDropped = 0;
+    var motionCounter = new MotionReps();
+    var motionAvailable = false;
+    var motionRate = 25;
+    var selectedSetKey = "";
+    var setFinished = false;
+    var restDeadline = 0;
+    var ticker = null;
+    var pendingAction = null;
 
-    var actionNames = [ "Log set", "Rest +15", "Rest -15", "Skip rest", "Next exercise", "Refresh", "Record HR" ];
+    var actionNames = [ "Complete Set", "Rest +15", "Rest -15", "Skip rest", "Next exercise", "Refresh", "Record HR" ];
     var actionIds = [ "log_set", "rest_plus_15", "rest_minus_15", "skip_rest", "next_exercise", "refresh", "toggle_hr" ];
 
     function initialize() { }
@@ -47,12 +57,76 @@ class GymController {
         try {
             Sensor.setEnabledSensors([ Sensor.SENSOR_HEARTRATE ]);
             Sensor.enableSensorEvents(method(:onSensor));
+            startMotion();
+            ticker = new Timer.Timer();
+            ticker.start(method(:tick), 1000, true);
         } catch (ex) {
             status = "HR sensor unavailable";
         }
     }
 
+    function startMotion() {
+        try {
+            var rate = Sensor.getMaxSampleRate();
+            if (rate == null || rate < 10) { return; }
+            if (rate > 25) { rate = 25; }
+            motionRate = rate;
+            Sensor.registerSensorDataListener(method(:onMotion), {
+                :period => 1,
+                :accelerometer => { :enabled => true, :sampleRate => rate }
+            });
+            motionAvailable = true;
+        } catch (ex) {
+            motionAvailable = false;
+        }
+    }
+
+    function onMotion(packet) {
+        if (!countingEnabled()) { return; }
+        if (packet == null || packet.accelerometerData == null) { return; }
+        var a = packet.accelerometerData;
+        if (a.x == null || a.y == null || a.z == null) { return; }
+        var n = a.x.size();
+        if (a.y.size() < n) { n = a.y.size(); }
+        if (a.z.size() < n) { n = a.z.size(); }
+        var now = System.getTimer();
+        var step = 1000.0 / motionRate;
+        var before = motionCounter.count;
+        for (var i = 0; i < n; i += 1) {
+            // Older Connect IQ versions provide batches without per-sample timestamps.
+            motionCounter.feed(a.x[i], a.y[i], a.z[i], now - (n - 1 - i) * step);
+        }
+        if (motionCounter.count != before) { WatchUi.requestUpdate(); }
+    }
+
+    function countingEnabled() {
+        return motionAvailable && sessionId != null && setNumber > 0 && !setFinished
+               && restSeconds <= 0 && !busy;
+    }
+
+    function estimatedReps() {
+        return motionAvailable ? motionCounter.count.toString() : "--";
+    }
+
+    function tick() {
+        if (restDeadline > 0 && restSeconds > 0) {
+            var left = Math.ceil((restDeadline - System.getTimer()) / 1000.0);
+            if (left <= 0) {
+                restDeadline = 0;
+                restSeconds = 0;
+                motionCounter.reset();
+                status = "Rest over";
+            } else {
+                restSeconds = left;
+            }
+            WatchUi.requestUpdate();
+        }
+        if (!recording && heartPending.size() > 0) { maybeSendHeartRate(true); }
+    }
+
     function stopSensors() {
+        if (ticker != null) { ticker.stop(); ticker = null; }
+        try { Sensor.unregisterSensorDataListener(); } catch (ex) { }
         try {
             Sensor.enableSensorEvents(null);
             Sensor.setEnabledSensors([]);
@@ -262,6 +336,11 @@ class GymController {
         }
         if (busy) { return; }
         if (actionIds[selected] == "refresh") { refresh(); return; }
+        if (actionIds[selected] == "log_set" && (sessionId == null || setFinished || setNumber == 0)) {
+            status = "No open set";
+            WatchUi.requestUpdate();
+            return;
+        }
         var base = apiBase();
         var headers = authHeaders();
         if (base == null || headers == null) {
@@ -275,7 +354,16 @@ class GymController {
         status = "Sending...";
         WatchUi.requestUpdate();
         try {
-            var payload = { "action" => actionIds[selected], "commandId" => id };
+            var action = actionIds[selected];
+            var payload = { "action" => action, "commandId" => id };
+            if (action == "log_set") {
+                payload["sessionId"] = sessionId;
+                payload["setNumber"] = setNumber;
+                payload["expectedVersion"] = version;
+                // Estimated count is metadata, not the workout's required reps.
+                payload["estimatedReps"] = motionAvailable ? motionCounter.count : null;
+            }
+            pendingAction = action;
             Communications.makeWebRequest(base + "/v1/commands", payload,
                 { :method => Communications.HTTP_REQUEST_METHOD_POST,
                   :headers => headers,
@@ -291,16 +379,21 @@ class GymController {
     function onResponse(code, body) {
         busy = false;
         if (code != 200) {
-            status = "HTTP/network: " + code.toString();
+            pendingAction = null;
+            status = code == 409 ? "Workout changed: refresh" : "HTTP/network: " + code.toString();
             WatchUi.requestUpdate();
             return;
         }
         if (!(body instanceof Dictionary)) {
+            pendingAction = null;
             status = "Bad server response";
             WatchUi.requestUpdate();
             return;
         }
         // Clamp/validate every field because response data is untrusted.
+        var actionDone = pendingAction;
+        pendingAction = null;
+        var oldKey = selectedSetKey;
         if (body["exercise"] instanceof String) { exercise = body["exercise"]; }
         if (body["setNumber"] instanceof Number) { setNumber = body["setNumber"]; }
         if (body["setCount"] instanceof Number) { setCount = body["setCount"]; }
@@ -309,7 +402,11 @@ class GymController {
         if (body["restSeconds"] instanceof Number) { restSeconds = body["restSeconds"]; }
         if (body["version"] instanceof Number) { version = body["version"]; }
         if (body["sessionId"] instanceof String) { sessionId = body["sessionId"]; }
-        status = "Synced v" + version.toString();
+        if (body["currentSetDone"] instanceof Boolean) { setFinished = body["currentSetDone"]; }
+        selectedSetKey = sessionId + ":" + exercise + ":" + setNumber.toString();
+        if (oldKey != selectedSetKey || actionDone == "log_set") { motionCounter.reset(); }
+        restDeadline = restSeconds > 0 ? System.getTimer() + restSeconds * 1000 : 0;
+        status = actionDone == "log_set" ? "Set checked off" : "Synced v" + version.toString();
         maybeSendHeartRate(!recording);
         WatchUi.requestUpdate();
     }

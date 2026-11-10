@@ -19,6 +19,8 @@ export class DemoWorkout {
     this.version = 1;
     this.sessionId = 'demo-' + crypto.randomUUID();
     this.seenCommands = new Map();
+    this.lastLoggedEstimate = null;
+    this.loggedSets = [];
   }
   state() {
     const e = this.exercises[this.exerciseIndex];
@@ -31,16 +33,36 @@ export class DemoWorkout {
       weight: e.weight,
       restSeconds: Math.max(0, Math.ceil((this.restEndsAt - this.now()) / 1000)),
       version: this.version,
-      completedSets: this.completedSets
+      completedSets: this.completedSets,
+      currentSetDone: this.completedSets >= e.sets,
+      lastLoggedEstimate: this.lastLoggedEstimate
     };
   }
-  command(id, action) {
-    if (this.seenCommands.has(id)) return this.seenCommands.get(id);
+  command(id, action, details = {}) {
+    const fingerprint = JSON.stringify({ action, details });
+    if (this.seenCommands.has(id)) {
+      const cached = this.seenCommands.get(id);
+      if (cached.fingerprint !== fingerprint) throw new CommandError(409, 'Command ID reused with different data');
+      return cached.state;
+    }
     const e = this.exercises[this.exerciseIndex];
     switch (action) {
       case 'log_set':
+        if (details.sessionId !== this.sessionId || details.setNumber !== this.completedSets + 1
+            || details.expectedVersion !== this.version) {
+          throw new CommandError(409, 'Workout changed; refresh before completing a set');
+        }
+        if (details.estimatedReps !== null
+            && (!Number.isInteger(details.estimatedReps) || details.estimatedReps < 0 || details.estimatedReps > 100)) {
+          throw new CommandError(400, 'Invalid estimated rep count');
+        }
         if (this.completedSets >= e.sets) throw new CommandError(409, 'All sets logged; select next exercise');
         this.completedSets += 1;
+        this.lastLoggedEstimate = details.estimatedReps;
+        this.loggedSets.push({
+          exercise: e.name, setNumber: this.completedSets,
+          targetReps: e.reps, estimatedReps: details.estimatedReps, weight: e.weight, at: this.now()
+        });
         this.restEndsAt = this.now() + 90_000;
         break;
       case 'rest_plus_15':
@@ -55,13 +77,14 @@ export class DemoWorkout {
       case 'next_exercise':
         this.exerciseIndex = (this.exerciseIndex + 1) % this.exercises.length;
         this.completedSets = 0;
+        this.lastLoggedEstimate = null;
         this.restEndsAt = 0;
         break;
       default: throw new CommandError(400, 'Unknown action');
     }
     this.version += 1;
     const result = this.state();
-    this.seenCommands.set(id, result);
+    this.seenCommands.set(id, { fingerprint, state: result });
     if (this.seenCommands.size > 256) {
       this.seenCommands.delete(this.seenCommands.keys().next().value);
     }
@@ -130,7 +153,10 @@ export function makeServer({ token, workout = new DemoWorkout(), hrStore = new H
             || !/^[a-zA-Z0-9_-]{1,90}$/.test(body.commandId)) {
           return reply(res, 400, { error: 'Invalid command' });
         }
-        return reply(res, 200, workout.command(body.commandId, body.action));
+        return reply(res, 200, workout.command(body.commandId, body.action, body.action === 'log_set' ? {
+          sessionId: body.sessionId, setNumber: body.setNumber,
+          expectedVersion: body.expectedVersion, estimatedReps: body.estimatedReps
+        } : {}));
       }
       return reply(res, 404, { error: 'Not found' });
     } catch (err) {

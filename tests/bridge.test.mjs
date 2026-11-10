@@ -39,10 +39,15 @@ test('state is a compact JSON workout snapshot', async () => {
 });
 
 test('commands mutate demo state and duplicate ids are idempotent', async () => {
-  const command = { action: 'log_set', commandId: 'command-100' };
+  const current = (await request('/v1/state')).json;
+  const command = { action: 'log_set', commandId: 'command-100',
+    sessionId: current.sessionId, setNumber: current.setNumber,
+    expectedVersion: current.version, estimatedReps: 8 };
   const first = await request('/v1/commands', { method: 'POST', body: command });
   assert.equal(first.code, 200);
   assert.equal(first.json.setNumber, 2);
+  assert.equal(first.json.lastLoggedEstimate, 8);
+  assert.equal(first.json.reps, 12);
   assert.equal(first.json.restSeconds, 90);
   const duplicate = await request('/v1/commands', { method: 'POST', body: command });
   assert.deepEqual(duplicate.json, first.json);

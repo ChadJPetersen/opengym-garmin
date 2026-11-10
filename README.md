@@ -112,3 +112,49 @@ Each accepted sample is journaled to `data/heart-rate.jsonl` (override with `HR_
 **Important limits:** The FIT activity is separate from upstream openGym workout history. This bridge records only a demo workout, **not a real OpenGym workout**. The watch app must remain running to send bridge samples. Pending samples are buffered for up to 48 readings (about four minutes), but are **not persisted across watch app exits or crashes**. Garmin FIT is the more durable HR record. Network failures are retried at most about every 30 seconds; longer outages may lose bridge samples. Garmin Connect sync is handled by Garmin, not this demo bridge. Wrist heart rate is not intended for medical monitoring.
 
 Next step: integrate the stream with real OpenGym workout IDs in the Android app/backend and avoid duplicate Health Connect workout sessions.
+
+
+## Experimental automatic rep counting + Complete Set
+
+The **original fēnix 5S** supports high-frequency accelerometer sensor data through Connect IQ 2.3+, so our Connect IQ 3.1 watch app can attempt wrist-based counting while the watch app is open.
+
+The main screen shows:
+
+```text
+    Hip Thrust
+      Set 2/4
+
+ ESTIMATED / REQUIRED
+       8 / 12
+
+      HR 118 bpm
+ Rest 0s | 135 lb
+
+   > Complete Set <
+```
+
+**No rep/weight editing controls are needed on the watch.** The required count and weight come from the current workout snapshot. While not resting, the watch detects a cycle of motion away from its baseline wrist posture and back. It counts only plausible complete motions and deliberately ignores brief movement; it never automatically marks a set as complete. When the set is finished, **START / ENTER on "Complete Set"** checks off the current set through the authenticated `POST /v1/commands` bridge. UP/DOWN can reach the existing secondary rest, navigation and HR actions.
+
+A completion request looks like this:
+
+```json
+{
+  "action": "log_set",
+  "commandId": "unique-request-id",
+  "sessionId": "demo-workout-session-id",
+  "setNumber": 2,
+  "expectedVersion": 5,
+  "estimatedReps": 8
+}
+```
+
+The demo server validates the active session, set number and revision before marking the set complete, then advances the set/rest state and acknowledges the write. Duplicate request IDs don't complete the set twice. **Estimated reps are saved separately from required/target reps; even a zero estimate or missing sensor can still complete the set.** The planned target and weight are not modified.
+
+### Current limitations and safety
+
+- **This currently checks off sets in the demo bridge, not the actual Android openGym application.** The standalone OpenGym Android app needs an adapter to receive these commands and invoke its own existing `setDone` action before acknowledgments truly mean the phone updated. See [Android integration contract](docs/ANDROID_INTEGRATION.md).
+- The motion detector is **experimental, not Garmin's proprietary Strength algorithm**. It is not exercise-aware, and needs real-device compilation and testing. Some leg exercises (leg press, hip thrust, leg curl) may produce nearly no wrist movement; the estimate may remain at zero.
+- Sensors must be available, the watch app must be open, and the watch must be worn consistently. The counter recalibrates at the beginning of each set and pauses during the rest interval. False positives are still possible from motion unrelated to a rep.
+- No automatic completion based on rep count. Pressing Complete Set is the only set-completion trigger.
+- The estimated counter is currently held in watch RAM only. It does not survive closing/restarting the app.
+- Do not treat the estimate as a verified exercise performance measurement. Make the eventual Android sync preserve target reps separately unless the user explicitly chooses to promote estimates to logged actual reps.
