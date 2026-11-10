@@ -1,5 +1,6 @@
 import Toybox.ActivityRecording;
 import Toybox.Application;
+import Toybox.Application.Storage;
 import Toybox.Communications;
 import Toybox.Lang;
 import Toybox.Math;
@@ -9,161 +10,212 @@ import Toybox.Time;
 import Toybox.Timer;
 import Toybox.WatchUi;
 
-// The bridge contract is intentionally small. It is NOT the upstream openGym API.
-// All writes require a separately issued, revocable WATCH token. Never use a
-// personal OpenGym password, pairing code, Home Assistant token, or session key.
+// Directly uses upstream openGym's authenticated watch-relay endpoints.
+// NO DEMO SERVER: /api/watch/redeem and /api/watch/box on your own openGym server.
+// SetDone enters the upstream mailbox and is applied by openGym's existing
+// watch-sync.js when the Android app or web client processes it.
 class GymController {
-    var exercise = "No workout loaded";
+    var exercise = "Open OpenGym";
     var setNumber = 0;
     var setCount = 0;
     var reps = 0;
     var weight = "";
     var restSeconds = 0;
-    var status = "Open app settings";
-    var busy = false;
+    var status = "Configure OpenGym";
     var selected = 0;
-    var version = 0;
-    var sequence = 0;
-    var sessionId = null;
+    var busy = false;
+    var mode = "";
+    var lastRequestAt = 0;
+    var timer = null;
+    var serverUrl = null;
+    var token = null;
 
-    var heartRate = 0;
-    var heartRateAt = 0;
-    var heartSamples = 0;
-    var heartTotal = 0;
-    var heartMax = 0;
-    var lastSampleAt = 0;
-    var recording = false;
-    var fitSession = null;
-    var heartPending = [];
-    var heartSending = false;
-    var heartSendingCount = 0;
-    var heartNextRetryAt = 0;
-    var heartDropped = 0;
+    var workoutId = "";
+    var exerciseId = "";
+    var entryIdx = 0;
+    var setIdx = 0;
+    var weightValue = 0.0;
+    var currentSetKey = "";
+    var cachedJson = null;
+    var outbox = [];
+    var awaiting = [];
+    var activeSnapshot = null;
+    var localRestEndsAt = 0.toLong();
+
     var motionCounter = new MotionReps();
     var motionAvailable = false;
     var motionRate = 25;
-    var selectedSetKey = "";
-    var setFinished = false;
-    var restDeadline = 0;
-    var ticker = null;
-    var pendingAction = null;
+    var heartRate = 0;
+    var heartRateAt = 0;
+    var setHeartTotal = 0;
+    var setHeartCount = 0;
+    var setHeartMax = 0;
 
-    var actionNames = [ "Complete Set", "Rest +15", "Rest -15", "Skip rest", "Next exercise", "Refresh", "Record HR" ];
-    var actionIds = [ "log_set", "rest_plus_15", "rest_minus_15", "skip_rest", "next_exercise", "refresh", "toggle_hr" ];
+    var recording = false;
+    var fitSession = null;
+    var recordedHeartTotal = 0;
+    var recordedHeartCount = 0;
+    var recordedHeartMax = 0;
 
-    function initialize() { }
+    var names = [ "Complete Set", "Refresh", "Record HR" ];
+
+    function initialize() {
+        outbox = Storage.getValue("outbox");
+        if (!(outbox instanceof Array)) { outbox = []; }
+        awaiting = Storage.getValue("awaiting");
+        if (!(awaiting instanceof Array)) { awaiting = []; }
+        token = Storage.getValue("watchToken");
+        if (!(token instanceof String) || token.length() < 8) { token = null; }
+        serverUrl = Application.getApp().getProperty("serverUrl");
+        if (!(serverUrl instanceof String) || serverUrl.substring(0, 8) != "https://") {
+            serverUrl = null;
+        } else {
+            while (serverUrl.length() > 0 && serverUrl.substring(serverUrl.length() - 1, serverUrl.length()) == "/") {
+                serverUrl = serverUrl.substring(0, serverUrl.length() - 1);
+            }
+        }
+    }
 
     function startSensors() {
         try {
             Sensor.setEnabledSensors([ Sensor.SENSOR_HEARTRATE ]);
             Sensor.enableSensorEvents(method(:onSensor));
-            startMotion();
-            ticker = new Timer.Timer();
-            ticker.start(method(:tick), 1000, true);
-        } catch (ex) {
-            status = "HR sensor unavailable";
-        }
-    }
-
-    function startMotion() {
+        } catch (ex) { status = "HR sensor unavailable"; }
         try {
             var rate = Sensor.getMaxSampleRate();
-            if (rate == null || rate < 10) { return; }
-            if (rate > 25) { rate = 25; }
-            motionRate = rate;
-            Sensor.registerSensorDataListener(method(:onMotion), {
-                :period => 1,
-                :accelerometer => { :enabled => true, :sampleRate => rate }
-            });
-            motionAvailable = true;
-        } catch (ex) {
-            motionAvailable = false;
-        }
+            if (rate != null && rate >= 10) {
+                if (rate > 25) { rate = 25; }
+                motionRate = rate;
+                Sensor.registerSensorDataListener(method(:onMotion), {
+                    :period => 1,
+                    :accelerometer => { :enabled => true, :sampleRate => rate }
+                });
+                motionAvailable = true;
+            }
+        } catch (ex) { motionAvailable = false; }
+        timer = new Timer.Timer();
+        timer.start(method(:tick), 1000, true);
+        refresh();
     }
 
-    function onMotion(packet) {
-        if (!countingEnabled()) { return; }
-        if (packet == null || packet.accelerometerData == null) { return; }
-        var a = packet.accelerometerData;
-        if (a.x == null || a.y == null || a.z == null) { return; }
-        var n = a.x.size();
-        if (a.y.size() < n) { n = a.y.size(); }
-        if (a.z.size() < n) { n = a.z.size(); }
-        var now = System.getTimer();
-        var step = 1000.0 / motionRate;
-        var before = motionCounter.count;
-        for (var i = 0; i < n; i += 1) {
-            // Older Connect IQ versions provide batches without per-sample timestamps.
-            motionCounter.feed(a.x[i], a.y[i], a.z[i], now - (n - 1 - i) * step);
-        }
-        if (motionCounter.count != before) { WatchUi.requestUpdate(); }
+    function shutDown() {
+        if (timer != null) { timer.stop(); timer = null; }
+        try { Sensor.unregisterSensorDataListener(); } catch (ex) { }
+        try { Sensor.enableSensorEvents(null); Sensor.setEnabledSensors([]); } catch (ex) { }
+        if (recording) { finishRecording(); }
+        saveQueue();
     }
 
-    function countingEnabled() {
-        return motionAvailable && sessionId != null && setNumber > 0 && !setFinished
-               && restSeconds <= 0 && !busy;
+    function saveQueue() {
+        try {
+            Storage.setValue("outbox", outbox);
+            Storage.setValue("awaiting", awaiting);
+        } catch (ex) { status = "Cannot save watch queue"; }
+    }
+
+    function nowMillis() {
+        return Time.now().value().toLong() * 1000;
+    }
+
+    function currentRest() {
+        var until = localRestEndsAt;
+        if (activeSnapshot != null && activeSnapshot["restEndsAt"] > until) {
+            until = activeSnapshot["restEndsAt"];
+        }
+        var seconds = (until - nowMillis()) / 1000;
+        return seconds > 0 ? seconds.toNumber() : 0;
+    }
+
+    function tick() {
+        restSeconds = currentRest();
+        if (!busy && System.getTimer() - lastRequestAt >= 15000) {
+            refresh();
+        }
+        WatchUi.requestUpdate();
+    }
+
+    function moveSelection(delta) {
+        selected = (selected + delta + names.size()) % names.size();
+        WatchUi.requestUpdate();
+    }
+
+    function selectedName() {
+        if (selected == 2) { return recording ? "Save HR activity" : "Start HR activity"; }
+        return names[selected];
     }
 
     function estimatedReps() {
         return motionAvailable ? motionCounter.count.toString() : "--";
     }
 
-    function tick() {
-        if (restDeadline > 0 && restSeconds > 0) {
-            var left = Math.ceil((restDeadline - System.getTimer()) / 1000.0);
-            if (left <= 0) {
-                restDeadline = 0;
-                restSeconds = 0;
-                motionCounter.reset();
-                status = "Rest over";
-            } else {
-                restSeconds = left;
-            }
-            WatchUi.requestUpdate();
+    function heartText() {
+        if (heartRate == 0 || Time.now().value() - heartRateAt > 15) {
+            return recording ? "HR -- REC" : "HR -- bpm";
         }
-        if (!recording && heartPending.size() > 0) { maybeSendHeartRate(true); }
+        return "HR " + heartRate.toString() + (recording ? " REC" : " bpm");
     }
 
-    function stopSensors() {
-        if (ticker != null) { ticker.stop(); ticker = null; }
-        try { Sensor.unregisterSensorDataListener(); } catch (ex) { }
-        try {
-            Sensor.enableSensorEvents(null);
-            Sensor.setEnabledSensors([]);
-        } catch (ex) { }
+    function heartStats() {
+        if (recordedHeartCount == 0) { return "AVG -- / MAX --"; }
+        return "AVG " + (recordedHeartTotal / recordedHeartCount).toString()
+            + " / MAX " + recordedHeartMax.toString();
     }
 
-    function shutDown() {
-        if (recording) { finishRecording(); }
-        stopSensors();
-        // A pending request is not guaranteed to complete as the app closes.
-        // Garmin's saved FIT activity is the durable recording in this case.
+    function onSensor(info) {
+        var bpm = info.heartRate;
+        if (bpm == null || bpm < 30 || bpm > 240) {
+            heartRate = 0;
+            return;
+        }
+        heartRate = bpm;
+        heartRateAt = Time.now().value();
+        if (recording) {
+            recordedHeartTotal += bpm;
+            recordedHeartCount += 1;
+            if (bpm > recordedHeartMax) { recordedHeartMax = bpm; }
+        }
+        if (currentSetKey != "" && currentRest() == 0) {
+            setHeartTotal += bpm;
+            setHeartCount += 1;
+            if (bpm > setHeartMax) { setHeartMax = bpm; }
+        }
+        WatchUi.requestUpdate();
+    }
+
+    function onMotion(data) {
+        if (!motionAvailable || currentSetKey == "" || currentRest() > 0) { return; }
+        if (data == null || data.accelerometerData == null) { return; }
+        var a = data.accelerometerData;
+        if (a.x == null || a.y == null || a.z == null) { return; }
+        var n = a.x.size();
+        if (a.y.size() < n) { n = a.y.size(); }
+        if (a.z.size() < n) { n = a.z.size(); }
+        var step = 1000.0 / motionRate;
+        var now = System.getTimer();
+        var before = motionCounter.count;
+        for (var i = 0; i < n; i += 1) {
+            motionCounter.feed(a.x[i], a.y[i], a.z[i], now - (n - 1 - i) * step);
+        }
+        if (motionCounter.count != before) { WatchUi.requestUpdate(); }
     }
 
     function startRecording() {
         if (recording) { return; }
         try {
             fitSession = ActivityRecording.createSession({
-                :name => "openGym",
-                :sport => ActivityRecording.SPORT_TRAINING
+                :name => "openGym", :sport => ActivityRecording.SPORT_TRAINING
             });
-            if (fitSession == null || !fitSession.start()) {
-                fitSession = null;
-                status = "Cannot start FIT";
-                WatchUi.requestUpdate();
-                return;
-            }
+            if (fitSession == null) { status = "FIT unavailable"; return; }
+            fitSession.start();
             recording = true;
-            heartSamples = 0;
-            heartTotal = 0;
-            heartMax = 0;
-            heartDropped = 0;
-            lastSampleAt = 0;
-            status = "Recording Garmin FIT";
+            recordedHeartCount = 0;
+            recordedHeartTotal = 0;
+            recordedHeartMax = 0;
+            status = "Garmin HR recording";
         } catch (ex) {
-            fitSession = null;
             recording = false;
-            status = "FIT recording failed";
+            fitSession = null;
+            status = "FIT start failed";
         }
         WatchUi.requestUpdate();
     }
@@ -171,243 +223,233 @@ class GymController {
     function finishRecording() {
         if (!recording) { return; }
         recording = false;
-        var ok = false;
         try {
-            if (fitSession != null) {
-                fitSession.stop();
-                ok = fitSession.save();
-            }
-        } catch (ex) { }
+            fitSession.stop();
+            fitSession.save();
+            status = "FIT activity saved";
+        } catch (ex) { status = "FIT save failed"; }
         fitSession = null;
-        // An incomplete final batch is also sent when possible.
-        maybeSendHeartRate(true);
-        status = ok ? "HR activity saved" : "FIT save failed";
         WatchUi.requestUpdate();
     }
 
-    function heartText() {
-        if (heartRate == 0 || Time.now().value() - heartRateAt > 15) {
-            return recording ? "HR -- bpm REC" : "HR -- bpm";
-        }
-        return "HR " + heartRate.toString() + " bpm" + (recording ? " REC" : "");
+    function selectAction() {
+        if (selected == 2) {
+            if (recording) { finishRecording(); }
+            else { startRecording(); }
+        } else if (selected == 1) { refresh(); }
+        else { completeSet(); }
     }
 
-    function heartStats() {
-        if (heartSamples == 0) { return "AVG -- / MAX --"; }
-        return "AVG " + (heartTotal / heartSamples).toString() + " / MAX " + heartMax.toString();
+    function setKey(wid, idx, si) {
+        return wid + ":" + idx.toString() + ":" + si.toString();
     }
 
-    function onSensor(info) {
-        var bpm = info.heartRate;
-        if (bpm == null || bpm < 30 || bpm > 240) {
-            heartRate = 0;
-            WatchUi.requestUpdate();
-            return;
+    function keyIn(collection, key) {
+        for (var i = 0; i < collection.size(); i += 1) {
+            if (collection[i] == key) { return true; }
         }
-        heartRate = bpm;
-        var now = Time.now().value();
-        heartRateAt = now;
-        if (recording && now - lastSampleAt >= 5) {
-            lastSampleAt = now;
-            heartSamples += 1;
-            heartTotal += bpm;
-            if (bpm > heartMax) { heartMax = bpm; }
-            if (heartPending.size() < 48) {
-                heartPending.add({ "t" => now, "bpm" => bpm });
-            } else {
-                heartDropped += 1;
-            }
-            maybeSendHeartRate(false);
-        } else if (!recording && heartPending.size() > 0) {
-            // Retry a short final batch after recording ends while the app is open.
-            maybeSendHeartRate(true);
-        }
-        WatchUi.requestUpdate();
+        return false;
     }
 
-    function maybeSendHeartRate(force) {
-        if (heartSending || busy || sessionId == null || heartPending.size() == 0) { return; }
-        if (!force && heartPending.size() < 6) { return; }
-        if (Time.now().value() < heartNextRetryAt) { return; }
-        var base = apiBase();
-        var headers = authHeaders();
-        if (base == null || headers == null) { return; }
-        heartSendingCount = heartPending.size();
-        if (heartSendingCount > 6) { heartSendingCount = 6; }
-        var batch = heartPending.slice(0, heartSendingCount);
-        heartSending = true;
-        try {
-            Communications.makeWebRequest(base + "/v1/heart-rate",
-                { "sessionId" => sessionId, "samples" => batch },
-                { :method => Communications.HTTP_REQUEST_METHOD_POST,
-                  :headers => headers,
-                  :responseType => Communications.HTTP_RESPONSE_CONTENT_TYPE_JSON },
-                method(:onHeartResponse));
-        } catch (ex) {
-            heartSending = false;
-            heartNextRetryAt = Time.now().value() + 30;
+    function allLocalKeys() {
+        var keys = awaiting.slice(0, null);
+        for (var i = 0; i < outbox.size(); i += 1) {
+            var ev = outbox[i];
+            keys.add(setKey(ev["wid"], ev["entryIdx"], ev["setIdx"]));
         }
+        return keys;
     }
 
-    function onHeartResponse(code, body) {
-        heartSending = false;
-        if (code == 200 && body instanceof Dictionary) {
-            heartPending = heartPending.slice(heartSendingCount, null);
-            heartNextRetryAt = 0;
-            if (heartPending.size() > 0) { maybeSendHeartRate(!recording); }
+    function refreshDisplay() {
+        if (!(cachedJson instanceof String)) { return; }
+        var parser = new WatchSnapshot(cachedJson);
+        var snap = parser.read(allLocalKeys());
+        var confirmed = snap["confirmed"];
+        var remaining = [];
+        var changed = false;
+        for (var i = 0; i < awaiting.size(); i += 1) {
+            if (!keyIn(confirmed, awaiting[i])) { remaining.add(awaiting[i]); }
+            else { changed = true; }
+        }
+        if (changed) {
+            awaiting = remaining;
+            saveQueue();
+            snap = parser.read(allLocalKeys());
+        }
+        activeSnapshot = snap;
+        var key = "";
+        if (snap["found"]) {
+            key = setKey(snap["workoutId"], snap["entryIdx"], snap["setIdx"]);
+            workoutId = snap["workoutId"];
+            exerciseId = snap["exerciseId"];
+            entryIdx = snap["entryIdx"];
+            setIdx = snap["setIdx"];
+            exercise = snap["exercise"];
+            setNumber = snap["setNumber"];
+            setCount = snap["setCount"];
+            reps = snap["reps"];
+            weightValue = snap["weight"];
+            weight = snap["weightText"] + " " + snap["unit"];
         } else {
-            heartNextRetryAt = Time.now().value() + 30;
-            // A 409 means the bridge restarted or switched demo sessions.
-            // Discard unmatched bridge samples (Garmin FIT still keeps HR).
-            if (code == 409) {
-                sessionId = null;
-                heartPending = [];
-            }
+            exercise = snap["workoutId"] == "" ? "OpenGym: no workout" : "All sets queued/done";
+            workoutId = snap["workoutId"];
+            exerciseId = "";
+            setNumber = 0;
+            setCount = 0;
+            reps = 0;
+            weight = "";
         }
+        if (key != currentSetKey) {
+            currentSetKey = key;
+            motionCounter.reset();
+            setHeartTotal = 0;
+            setHeartCount = 0;
+            setHeartMax = 0;
+        }
+        restSeconds = currentRest();
+        if (changed) { status = "Set checked in app"; }
+        else if (outbox.size() > 0 || awaiting.size() > 0) { status = "Queued for OpenGym"; }
+        else { status = "OpenGym connected"; }
         WatchUi.requestUpdate();
     }
 
-
-    function moveSelection(delta) {
-        selected = (selected + delta + actionNames.size()) % actionNames.size();
+    function completeSet() {
+        if (currentSetKey == "" || workoutId == "") {
+            status = "No open set"; WatchUi.requestUpdate(); return;
+        }
+        if (outbox.size() >= 24) {
+            status = "Queue full - open app"; WatchUi.requestUpdate(); return;
+        }
+        // OpenGym's setDone uses the existing planned 'r' and 'w'. The motion
+        // estimate is informational and NEVER overwrites the required reps.
+        var id = "f5s-" + Time.now().value().toString() + "-" + System.getTimer().toString();
+        var ev = {
+            "id" => id, "type" => "setDone", "wid" => workoutId,
+            "exId" => exerciseId, "entryIdx" => entryIdx, "setIdx" => setIdx,
+            "w" => weightValue, "r" => reps, "at" => nowMillis()
+        };
+        if (setHeartCount > 0) {
+            ev["hr"] = { "avg" => setHeartTotal / setHeartCount, "max" => setHeartMax };
+        }
+        outbox.add(ev);
+        saveQueue(); // Persist before network: a crash cannot silently lose a set.
+        var rest = 90;
+        // The phone's own rest timer starts when it applies the event. Until
+        // then use a watch-local countdown; don't claim it changed the app.
+        localRestEndsAt = nowMillis() + rest * 1000;
+        refreshDisplay(); // Advance locally, including other queued sets.
+        status = "Queued - not yet applied";
+        if (!busy) { sendNext(); }
         WatchUi.requestUpdate();
     }
 
-    function selectedName() {
-        if (actionIds[selected] == "toggle_hr") {
-            return recording ? "Save HR activity" : "Start HR activity";
-        }
-        return actionNames[selected];
+    function requestHeaders(includeToken) {
+        var h = { "Content-Type" => Communications.REQUEST_CONTENT_TYPE_JSON };
+        if (includeToken) { h["Authorization"] = "Bearer " + token; }
+        return h;
     }
 
-    function apiBase() {
-        var url = Application.getApp().getProperty("serverUrl");
-        if (url == null || !(url instanceof String) || url.length() < 9) {
-            return null;
+    function makeRequest(path, payload, kind) {
+        if (busy || serverUrl == null) { return; }
+        busy = true;
+        mode = kind;
+        lastRequestAt = System.getTimer();
+        var post = payload != null;
+        try {
+            Communications.makeWebRequest(serverUrl + path, payload,
+                { :method => post ? Communications.HTTP_REQUEST_METHOD_POST : Communications.HTTP_REQUEST_METHOD_GET,
+                  :headers => requestHeaders(kind != "redeem"),
+                  :responseType => Communications.HTTP_RESPONSE_CONTENT_TYPE_JSON },
+                method(:onResponse));
+        } catch (ex) {
+            busy = false;
+            mode = "";
+            status = "Garmin connection failed";
+            WatchUi.requestUpdate();
         }
-        // Avoid accepting an HTTP endpoint that could expose a watch credential.
-        if (url.substring(0, 8) != "https://") {
-            return null;
-        }
-        while (url.length() > 0 && url.substring(url.length() - 1, url.length()) == "/") {
-            url = url.substring(0, url.length() - 1);
-        }
-        return url;
-    }
-
-    function authHeaders() {
-        var token = Application.getApp().getProperty("watchToken");
-        if (token == null || !(token instanceof String) || token.length() == 0) {
-            return null;
-        }
-        return { "Authorization" => "Bearer " + token,
-                 "Content-Type" => Communications.REQUEST_CONTENT_TYPE_JSON };
     }
 
     function refresh() {
         if (busy) { return; }
-        var base = apiBase();
-        var headers = authHeaders();
-        if (base == null || headers == null) {
-            status = "Set HTTPS URL + token";
-            WatchUi.requestUpdate();
+        if (serverUrl == null) {
+            status = "Set HTTPS OpenGym URL"; WatchUi.requestUpdate(); return;
+        }
+        if (token == null) {
+            var pairing = Application.getApp().getProperty("pairingCode");
+            if (!(pairing instanceof String) || pairing.length() < 12) {
+                status = "Pair in OpenGym settings"; WatchUi.requestUpdate(); return;
+            }
+            status = "Pairing watch...";
+            makeRequest("/api/watch/redeem",
+                { "code" => pairing, "name" => "Garmin fenix 5S" }, "redeem");
             return;
         }
-        busy = true;
-        status = "Refreshing...";
-        WatchUi.requestUpdate();
-        try {
-            Communications.makeWebRequest(base + "/v1/state", null,
-                { :method => Communications.HTTP_REQUEST_METHOD_GET,
-                  :headers => headers,
-                  :responseType => Communications.HTTP_RESPONSE_CONTENT_TYPE_JSON },
-                method(:onResponse));
-        } catch (ex) {
-            busy = false;
-            status = "Connection unavailable";
-            WatchUi.requestUpdate();
-        }
+        if (outbox.size() > 0) { sendNext(); return; }
+        makeRequest("/api/watch/box", null, "snapshot");
     }
 
-    function selectAction() {
-        if (actionIds[selected] == "toggle_hr") {
-            if (recording) { finishRecording(); } else { startRecording(); }
-            return;
-        }
-        if (busy) { return; }
-        if (actionIds[selected] == "refresh") { refresh(); return; }
-        if (actionIds[selected] == "log_set" && (sessionId == null || setFinished || setNumber == 0)) {
-            status = "No open set";
-            WatchUi.requestUpdate();
-            return;
-        }
-        var base = apiBase();
-        var headers = authHeaders();
-        if (base == null || headers == null) {
-            status = "Set HTTPS URL + token";
-            WatchUi.requestUpdate();
-            return;
-        }
-        sequence += 1;
-        var id = Time.now().value().toString() + "-" + System.getTimer().toString() + "-" + sequence.toString();
-        busy = true;
-        status = "Sending...";
-        WatchUi.requestUpdate();
-        try {
-            var action = actionIds[selected];
-            var payload = { "action" => action, "commandId" => id };
-            if (action == "log_set") {
-                payload["sessionId"] = sessionId;
-                payload["setNumber"] = setNumber;
-                payload["expectedVersion"] = version;
-                // Estimated count is metadata, not the workout's required reps.
-                payload["estimatedReps"] = motionAvailable ? motionCounter.count : null;
-            }
-            pendingAction = action;
-            Communications.makeWebRequest(base + "/v1/commands", payload,
-                { :method => Communications.HTTP_REQUEST_METHOD_POST,
-                  :headers => headers,
-                  :responseType => Communications.HTTP_RESPONSE_CONTENT_TYPE_JSON },
-                method(:onResponse));
-        } catch (ex) {
-            busy = false;
-            status = "Unable to send";
-            WatchUi.requestUpdate();
-        }
+    function sendNext() {
+        if (busy || token == null || outbox.size() == 0) { return; }
+        status = "Sending set to OpenGym";
+        makeRequest("/api/watch/box", { "events" => [ outbox[0] ] }, "events");
     }
 
     function onResponse(code, body) {
+        var kind = mode;
         busy = false;
-        if (code != 200) {
-            pendingAction = null;
-            status = code == 409 ? "Workout changed: refresh" : "HTTP/network: " + code.toString();
+        mode = "";
+        if (code == 401 && kind != "redeem") {
+            token = null;
+            Storage.deleteValue("watchToken");
+            status = "Pairing expired - pair again";
             WatchUi.requestUpdate();
             return;
         }
-        if (!(body instanceof Dictionary)) {
-            pendingAction = null;
-            status = "Bad server response";
+        if (code != 200 || !(body instanceof Dictionary)) {
+            status = "OpenGym HTTP " + code.toString();
             WatchUi.requestUpdate();
             return;
         }
-        // Clamp/validate every field because response data is untrusted.
-        var actionDone = pendingAction;
-        pendingAction = null;
-        var oldKey = selectedSetKey;
-        if (body["exercise"] instanceof String) { exercise = body["exercise"]; }
-        if (body["setNumber"] instanceof Number) { setNumber = body["setNumber"]; }
-        if (body["setCount"] instanceof Number) { setCount = body["setCount"]; }
-        if (body["reps"] instanceof Number) { reps = body["reps"]; }
-        if (body["weight"] instanceof String) { weight = body["weight"]; }
-        if (body["restSeconds"] instanceof Number) { restSeconds = body["restSeconds"]; }
-        if (body["version"] instanceof Number) { version = body["version"]; }
-        if (body["sessionId"] instanceof String) { sessionId = body["sessionId"]; }
-        if (body["currentSetDone"] instanceof Boolean) { setFinished = body["currentSetDone"]; }
-        selectedSetKey = sessionId + ":" + exercise + ":" + setNumber.toString();
-        if (oldKey != selectedSetKey || actionDone == "log_set") { motionCounter.reset(); }
-        restDeadline = restSeconds > 0 ? System.getTimer() + restSeconds * 1000 : 0;
-        status = actionDone == "log_set" ? "Set checked off" : "Synced v" + version.toString();
-        maybeSendHeartRate(!recording);
+        if (kind == "redeem") {
+            var received = body["token"];
+            if (!(received instanceof String) || received.substring(0, 4) != "ogw_") {
+                status = "Invalid pairing response"; return;
+            }
+            token = received;
+            Storage.setValue("watchToken", token);
+            status = "Watch paired";
+            WatchUi.requestUpdate();
+            return;
+        }
+
+        if (kind == "events" && outbox.size() > 0) {
+            var accepted = body["accepted"];
+            var id = outbox[0]["id"];
+            var confirmed = false;
+            if (accepted instanceof Array) {
+                for (var i = 0; i < accepted.size(); i += 1) {
+                    if (accepted[i] == id) { confirmed = true; break; }
+                }
+            }
+            if (!confirmed) {
+                status = "Server did not queue set";
+                WatchUi.requestUpdate();
+                return;
+            }
+            var ev = outbox.remove(0);
+            var key = setKey(ev["wid"], ev["entryIdx"], ev["setIdx"]);
+            if (!keyIn(awaiting, key)) { awaiting.add(key); }
+            saveQueue();
+        }
+        if (body["json"] instanceof String) {
+            cachedJson = body["json"];
+            refreshDisplay();
+        } else if (kind == "snapshot") {
+            status = "Open OpenGym on phone";
+        }
+        if (kind == "events") {
+            status = "Queued for OpenGym";
+        }
         WatchUi.requestUpdate();
     }
 }
