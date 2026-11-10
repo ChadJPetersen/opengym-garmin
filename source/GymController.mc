@@ -144,6 +144,9 @@ class GymController {
                 heartDropped += 1;
             }
             maybeSendHeartRate(false);
+        } else if (!recording && heartPending.size() > 0) {
+            // Retry a short final batch after recording ends while the app is open.
+            maybeSendHeartRate(true);
         }
         WatchUi.requestUpdate();
     }
@@ -177,7 +180,7 @@ class GymController {
         if (code == 200 && body instanceof Dictionary) {
             heartPending = heartPending.slice(heartSendingCount, null);
             heartNextRetryAt = 0;
-            if (heartPending.size() >= 6) { maybeSendHeartRate(false); }
+            if (heartPending.size() > 0) { maybeSendHeartRate(!recording); }
         } else {
             heartNextRetryAt = Time.now().value() + 30;
             // A 409 means the bridge restarted or switched demo sessions.
@@ -307,7 +310,7 @@ class GymController {
         if (body["version"] instanceof Number) { version = body["version"]; }
         if (body["sessionId"] instanceof String) { sessionId = body["sessionId"]; }
         status = "Synced v" + version.toString();
-        maybeSendHeartRate(false);
+        maybeSendHeartRate(!recording);
         WatchUi.requestUpdate();
     }
 }
