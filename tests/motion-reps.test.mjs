@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MotionRepCounter } from '../bridge/motion-reps.mjs';
+import { MotionRepCounter } from './support/motion-reps.mjs';
 
 const sample = (c, x, z, t) => c.feed(x, 0, z, t);
 
