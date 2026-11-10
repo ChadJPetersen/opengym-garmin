@@ -54,6 +54,10 @@ Use the [Garmin Connect IQ SDK](https://developer.garmin.com/connect-iq/sdk/) an
 
 See [real relay protocol](docs/RELAY_PROTOCOL.md) for API details. Relevant upstream code: [watch relay](https://github.com/DuarteSantos8/openGym/blob/v1.4.4/api/watch-relay.js), [watch event consumer](https://github.com/DuarteSantos8/openGym/blob/v1.4.4/frontend/src/lib/watch-sync.js), and [Zepp relay documentation](https://github.com/DuarteSantos8/openGym/blob/v1.4.4/docs/ZEPP_OS.md).
 
+## Automated maintenance
+
+The repository has a [daily upstream release watcher](.github/workflows/check-upstream.yml) that opens compatibility issues and a [monthly Codex agent](.github/workflows/monthly-garmin-agent.yml) that proposes tested fixes, improvements and new features as reviewable pull requests. **Nothing is auto-merged.** The monthly agent requires an `OPENAI_API_KEY` GitHub Actions secret in this repository and permission for Actions to create pull requests. See [automation setup and safeguards](docs/AUTOMATION.md).
+
 ## License
 
 MIT for this repository's original code. Upstream OpenGym is separately AGPL-licensed.
