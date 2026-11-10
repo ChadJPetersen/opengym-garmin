@@ -1,0 +1,9 @@
+{
+  "repository": "DuarteSantos8/openGym",
+  "lastReviewedRelease": "v1.4.4",
+  "watch": {
+    "device": "fenix5s",
+    "minConnectIqApi": "3.1.0"
+  },
+  "notes": "Tracks reviewed upstream source/API release, not device or compiler verification."
+}
