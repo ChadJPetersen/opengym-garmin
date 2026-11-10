@@ -1,6 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { HeartRateStore } from './hr-store.mjs';
 
 // DEMO ONLY. No OpenGym APIs are called and no real workout is modified.
 // Production: replace DemoWorkout with an authenticated live-workout adapter.
@@ -16,11 +17,13 @@ export class DemoWorkout {
     this.completedSets = 0;
     this.restEndsAt = 0;
     this.version = 1;
+    this.sessionId = 'demo-' + crypto.randomUUID();
     this.seenCommands = new Map();
   }
   state() {
     const e = this.exercises[this.exerciseIndex];
     return {
+      sessionId: this.sessionId,
       exercise: e.name,
       setNumber: Math.min(this.completedSets + 1, e.sets),
       setCount: e.sets,
@@ -97,7 +100,7 @@ async function readJson(req) {
   catch { throw new CommandError(400, 'Invalid JSON'); }
 }
 
-export function makeServer({ token, workout = new DemoWorkout() }) {
+export function makeServer({ token, workout = new DemoWorkout(), hrStore = new HeartRateStore() }) {
   if (!token || token.length < 16) throw new Error('WATCH_TOKEN must have at least 16 characters');
   return http.createServer(async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
@@ -106,6 +109,17 @@ export function makeServer({ token, workout = new DemoWorkout() }) {
     if (!tokenMatches(bearer, token)) return reply(res, 401, { error: 'Unauthorized' });
     try {
       if (req.method === 'GET' && path === '/v1/state') return reply(res, 200, workout.state());
+      if (req.method === 'GET' && path === '/v1/heart-rate') return reply(res, 200, hrStore.summary(workout.sessionId));
+      if (req.method === 'POST' && path === '/v1/heart-rate') {
+        if (!req.headers['content-type']?.startsWith('application/json')) {
+          return reply(res, 415, { error: 'Expected application/json' });
+        }
+        const body = await readJson(req);
+        if (!body || body.sessionId !== workout.sessionId) {
+          return reply(res, 409, { error: 'Workout session does not match' });
+        }
+        return reply(res, 200, hrStore.append(body.sessionId, body.samples));
+      }
       if (req.method === 'POST' && path === '/v1/commands') {
         if (!req.headers['content-type']?.startsWith('application/json')) {
           return reply(res, 415, { error: 'Expected application/json' });
