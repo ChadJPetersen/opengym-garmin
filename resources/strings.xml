@@ -1,7 +1,7 @@
 <strings>
   <string id="AppName">openGym Remote</string>
-  <string id="ServerUrlTitle">Bridge base URL (HTTPS)</string>
-  <string id="ServerUrlPrompt">https://example.com</string>
-  <string id="WatchTokenTitle">Dedicated watch token</string>
-  <string id="WatchTokenPrompt">Watch-only token; NOT your OpenGym password</string>
+  <string id="ServerUrlTitle">Your openGym HTTPS URL</string>
+  <string id="ServerUrlPrompt">https://your-home-assistant/opengym</string>
+  <string id="PairCodeTitle">One-time openGym watch pairing code</string>
+  <string id="PairCodePrompt">XXXX-XXXX-XXXX from openGym Zepp watch settings</string>
 </strings>
