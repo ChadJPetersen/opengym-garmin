@@ -24,13 +24,13 @@ test('setDone payload identifies a real workout and set; it is persisted before 
   assert.match(ctrl, /outbox\.add\(ev\);\s*saveQueue\(\)/);
   assert.match(ctrl, /"events" => \[ outbox\[0\] \]/);
   assert.match(ctrl, /body\["accepted"\]/);
-  assert.match(ctrl, /"done"/);
+  assert.match(parser, /"done"/);
 });
 
 test('paired watch only stores the scoped watch credential, not a login token', () => {
   assert.match(ctrl, /Storage\.setValue\("watchToken", token\)/);
   assert.match(ctrl, /"ogw_"/);
-  assert.match(ctrl, /"Authorization" => "Bearer " \+ token/);
+  assert.match(ctrl, /h\["Authorization"\] = "Bearer " \+ token/);
   assert.doesNotMatch(ctrl, /password|gymsid|homeassistant.*token/i);
 });
 
