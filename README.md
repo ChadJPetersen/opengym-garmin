@@ -12,7 +12,14 @@
 - Live heart rate, per-set avg/max HR included in the set event, optional native Garmin FIT activity recording.
 - No OpenGym password, Home Assistant token, or full account session stored on the watch; uses a revocable dedicated watch token.
 
+## Install on an original fēnix 5S
+
+This is a **source-only prototype**; no prebuilt Garmin `.PRG` is available yet. Use the [Windows sideload installation guide](docs/SIDELOAD.md) to compile the `fenix5s` target and copy it over USB.
+
+**Critical:** Apps installed by copying a `.PRG` generally **cannot have their settings edited in Garmin Connect**. For sideload testing, use the Garmin simulator to generate and copy a matching `.SET` settings file (explained in that guide), or use a Garmin Connect IQ Store beta distribution after compilation.
+
 ## Pairing
+
 
 1. **Required:** update your self-hosted OpenGym to **1.4.4 or newer**. The Home Assistant wrapper previously pinned 1.4.3, which lacks these relay endpoints. Back up the app before upgrading.
 2. Connect the official Android openGym app to that self-hosted server, not local-only mode. Ensure the **Watch** module is enabled.
